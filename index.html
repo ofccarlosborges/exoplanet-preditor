@@ -1,0 +1,416 @@
+# backend_server.py
+from flask import Flask, request, jsonify, render_template_string
+from flask_cors import CORS
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+import joblib
+import io
+import base64
+
+app = Flask(__name__)
+CORS(app)  # Permite requisições do frontend
+
+# Carregar modelo e scaler treinados
+print("Carregando modelo...")
+model = tf.keras.models.load_model('modelo_massa_exoplaneta.h5')
+scaler = joblib.load('scaler_exoplanetas.pkl')
+print("✅ Modelo carregado com sucesso!")
+
+# Colunas necessárias (mesmas do seu treinamento)
+REQUIRED_COLUMNS = [
+    'pl_orbper', 'pl_orbsmax', 'pl_radj', 'pl_orbeccen', 'pl_eqt', 'pl_orblper',
+    'pl_rvamp', 'st_teff', 'st_rad', 'st_mass', 'st_met', 'st_logg'
+]
+
+@app.route('/')
+def home():
+    # Retorna o HTML do frontend
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    try:
+        # Receber dados do frontend
+        data = request.json
+        csv_data = data['csv_data']
+        
+        # Converter para DataFrame
+        df = pd.DataFrame(csv_data)
+        
+        # Verificar colunas necessárias
+        missing_cols = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+        if missing_cols:
+            return jsonify({
+                'error': f'Colunas obrigatórias não encontradas: {missing_cols}'
+            }), 400
+        
+        # Filtrar e limpar dados
+        df_clean = df[REQUIRED_COLUMNS].copy()
+        df_clean = df_clean.dropna()
+        
+        if len(df_clean) == 0:
+            return jsonify({'error': 'Nenhum dado válido encontrado'}), 400
+        
+        # Preparar dados para predição
+        X = df_clean.values
+        
+        # Padronizar usando o scaler treinado
+        X_scaled = scaler.transform(X)
+        
+        # Fazer predições com o modelo real
+        predictions = model.predict(X_scaled, verbose=0)
+        predictions = predictions.flatten()
+        
+        # Calcular estatísticas
+        stats = {
+            'total_planets': len(predictions),
+            'avg_mass': float(np.mean(predictions)),
+            'min_mass': float(np.min(predictions)),
+            'max_mass': float(np.max(predictions)),
+            'std_mass': float(np.std(predictions))
+        }
+        
+        # Classificar planetas
+        categories = []
+        for mass in predictions:
+            if mass < 0.1:
+                categories.append('Rochoso')
+            elif mass < 0.3:
+                categories.append('Super-Terra')
+            elif mass < 4:
+                categories.append('Netuno')
+            else:
+                categories.append('Gigante Gasoso')
+        
+        # Preparar resultados detalhados
+        detailed_results = []
+        for i, (_, row) in enumerate(df_clean.iterrows()):
+            detailed_results.append({
+                'index': i + 1,
+                'orbital_period': float(row['pl_orbper']),
+                'radius': float(row['pl_radj']),
+                'stellar_mass': float(row['st_mass']),
+                'predicted_mass': float(predictions[i]),
+                'category': categories[i],
+                'confidence': 'Alta' if predictions[i] > 0.1 else 'Média'
+            })
+        
+        return jsonify({
+            'success': True,
+            'stats': stats,
+            'predictions': predictions.tolist(),
+            'categories': categories,
+            'detailed_results': detailed_results
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/model_info', methods=['GET'])
+def model_info():
+    """Retorna informações sobre o modelo"""
+    try:
+        # Informações do modelo
+        model_info = {
+            'layers': len(model.layers),
+            'parameters': model.count_params(),
+            'input_shape': model.input_shape,
+            'output_shape': model.output_shape,
+            'optimizer': model.optimizer.get_config()['name'],
+            'loss': model.loss,
+            'required_columns': REQUIRED_COLUMNS
+        }
+        
+        return jsonify(model_info)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Template HTML integrado (mesmo frontend, mas chamando API real)
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Preditor de Massa de Exoplanetas - Produção</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <style>
+        /* Mesmo CSS do frontend anterior */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh; padding: 20px;
+        }
+        .container { 
+            max-width: 1200px; margin: 0 auto; 
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+        }
+        .header { 
+            background: linear-gradient(45deg, #1e3c72, #2a5298);
+            color: white; padding: 30px; text-align: center; border-radius: 20px 20px 0 0;
+        }
+        .header h1 { font-size: 2.5em; margin-bottom: 10px; }
+        .main-content { padding: 40px; }
+        .upload-section { 
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            border-radius: 15px; padding: 30px; text-align: center; margin-bottom: 30px; color: white;
+        }
+        .file-button { 
+            background: rgba(255, 255, 255, 0.2); border: 2px dashed rgba(255, 255, 255, 0.8);
+            border-radius: 10px; padding: 20px 40px; cursor: pointer; display: inline-block;
+        }
+        .predict-btn { 
+            background: linear-gradient(45deg, #4CAF50, #45a049); color: white; border: none;
+            padding: 15px 30px; font-size: 1.1em; border-radius: 25px; cursor: pointer; margin: 20px 10px;
+        }
+        .predict-btn:disabled { background: #ccc; cursor: not-allowed; }
+        .results-section { background: white; border-radius: 15px; padding: 30px; margin-top: 30px; display: none; }
+        .results-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; }
+        .result-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 10px; text-align: center; }
+        .result-card .value { font-size: 2em; font-weight: bold; margin: 10px 0; }
+        .loading { display: none; text-align: center; padding: 20px; }
+        .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite; margin: 0 auto 20px; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .error { background: #ffebee; color: #c62828; padding: 15px; border-radius: 10px; margin: 20px 0; }
+        .success { background: #e8f5e8; color: #2e7d32; padding: 15px; border-radius: 10px; margin: 20px 0; }
+        .chart-container { width: 100%; height: 400px; margin: 20px 0; }
+        .predictions-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        .predictions-table th, .predictions-table td { padding: 12px; text-align: center; border-bottom: 1px solid #eee; }
+        .predictions-table th { background: linear-gradient(45deg, #667eea, #764ba2); color: white; }
+        .predictions-table tr:nth-child(even) { background-color: #f8f9fa; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🌌 Preditor de Massa de Exoplanetas</h1>
+            <p>Sistema com IA Real - Modelo TensorFlow Treinado</p>
+        </div>
+
+        <div class="main-content">
+            <div class="upload-section">
+                <h2>📁 Upload do Arquivo CSV</h2>
+                <input type="file" id="csvFile" accept=".csv" style="display: none;" />
+                <div class="file-button" onclick="document.getElementById('csvFile').click()">
+                    <span id="file-text">Clique para selecionar arquivo CSV</span>
+                </div>
+                <br>
+                <button class="predict-btn" id="predictBtn" disabled>🚀 Fazer Predições com IA</button>
+                <button class="predict-btn" id="sampleBtn">📊 Usar Dados de Exemplo</button>
+            </div>
+
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <p>Processando com modelo real de IA...</p>
+            </div>
+
+            <div class="results-section" id="results">
+                <h2>📈 Resultados das Predições</h2>
+                <div class="results-grid" id="resultsGrid"></div>
+                <div class="chart-container">
+                    <canvas id="predictionsChart"></canvas>
+                </div>
+                <table class="predictions-table" id="predictionsTable"></table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let csvData = [];
+        let predictionsChart = null;
+
+        document.getElementById('csvFile').addEventListener('change', handleFileSelect);
+        document.getElementById('predictBtn').addEventListener('click', makePredictions);
+        document.getElementById('sampleBtn').addEventListener('click', useSampleData);
+
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (file) {
+                document.getElementById('file-text').textContent = file.name;
+                
+                Papa.parse(file, {
+                    header: true,
+                    delimiter: ';',
+                    skipEmptyLines: true,
+                    complete: function(results) {
+                        csvData = results.data;
+                        document.getElementById('predictBtn').disabled = false;
+                        showSuccess(`✅ Arquivo carregado: ${csvData.length} registros`);
+                    }
+                });
+            }
+        }
+
+        function useSampleData() {
+            csvData = [
+                {
+                    pl_orbper: 365.25, pl_orbsmax: 1.0, pl_radj: 1.0, pl_orbeccen: 0.02,
+                    pl_eqt: 288, pl_orblper: 102, pl_rvamp: 0.09, st_teff: 5778,
+                    st_rad: 1.0, st_mass: 1.0, st_met: 0.0, st_logg: 4.43
+                },
+                {
+                    pl_orbper: 4333, pl_orbsmax: 5.2, pl_radj: 11.2, pl_orbeccen: 0.05,
+                    pl_eqt: 110, pl_orblper: 14, pl_rvamp: 12.4, st_teff: 5778,
+                    st_rad: 1.0, st_mass: 1.0, st_met: 0.0, st_logg: 4.43
+                }
+            ];
+            document.getElementById('predictBtn').disabled = false;
+            document.getElementById('file-text').textContent = 'Dados de exemplo carregados';
+            showSuccess('✅ Dados de exemplo carregados!');
+        }
+
+        async function makePredictions() {
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('results').style.display = 'none';
+
+            try {
+                // Chamar API do backend com modelo real
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        csv_data: csvData
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.error) {
+                    showError(result.error);
+                    return;
+                }
+
+                // Mostrar resultados
+                displayResults(result.stats);
+                createChart(result.predictions);
+                createTable(result.detailed_results);
+
+            } catch (error) {
+                showError('Erro ao conectar com o servidor: ' + error.message);
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        }
+
+        function displayResults(stats) {
+            const resultsGrid = document.getElementById('resultsGrid');
+            resultsGrid.innerHTML = `
+                <div class="result-card">
+                    <h3>Total de Planetas</h3>
+                    <div class="value">${stats.total_planets}</div>
+                </div>
+                <div class="result-card">
+                    <h3>Massa Média</h3>
+                    <div class="value">${stats.avg_mass.toFixed(3)}</div>
+                    <small>Massas de Júpiter</small>
+                </div>
+                <div class="result-card">
+                    <h3>Menor Massa</h3>
+                    <div class="value">${stats.min_mass.toFixed(3)}</div>
+                    <small>Massas de Júpiter</small>
+                </div>
+                <div class="result-card">
+                    <h3>Maior Massa</h3>
+                    <div class="value">${stats.max_mass.toFixed(3)}</div>
+                    <small>Massas de Júpiter</small>
+                </div>
+            `;
+            document.getElementById('results').style.display = 'block';
+        }
+
+        function createChart(predictions) {
+            const ctx = document.getElementById('predictionsChart').getContext('2d');
+            
+            if (predictionsChart) predictionsChart.destroy();
+
+            predictionsChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: predictions.map((_, i) => `Planeta ${i + 1}`),
+                    datasets: [{
+                        label: 'Massa Predita (M_Júpiter)',
+                        data: predictions,
+                        backgroundColor: 'rgba(102, 126, 234, 0.6)',
+                        borderColor: 'rgba(102, 126, 234, 1)',
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: 'Predições do Modelo Real de IA'
+                        }
+                    }
+                }
+            });
+        }
+
+        function createTable(detailedResults) {
+            const table = document.getElementById('predictionsTable');
+            let html = `
+                <thead>
+                    <tr>
+                        <th>Planeta</th>
+                        <th>Período Orbital</th>
+                        <th>Raio</th>
+                        <th>Massa Estelar</th>
+                        <th>Massa Predita</th>
+                        <th>Categoria</th>
+                        <th>Confiança</th>
+                    </tr>
+                </thead>
+                <tbody>
+            `;
+
+            detailedResults.forEach(result => {
+                html += `
+                    <tr>
+                        <td>${result.index}</td>
+                        <td>${result.orbital_period.toFixed(1)}</td>
+                        <td>${result.radius.toFixed(2)}</td>
+                        <td>${result.stellar_mass.toFixed(2)}</td>
+                        <td><strong>${result.predicted_mass.toFixed(4)}</strong></td>
+                        <td>${result.category}</td>
+                        <td>${result.confidence}</td>
+                    </tr>
+                `;
+            });
+
+            html += '</tbody>';
+            table.innerHTML = html;
+        }
+
+        function showError(message) {
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'error';
+            errorDiv.innerHTML = `❌ ${message}`;
+            document.querySelector('.main-content').insertBefore(errorDiv, document.querySelector('.upload-section'));
+        }
+
+        function showSuccess(message) {
+            const existing = document.querySelector('.success, .error');
+            if (existing) existing.remove();
+
+            const successDiv = document.createElement('div');
+            successDiv.className = 'success';
+            successDiv.innerHTML = `${message}`;
+            document.querySelector('.main-content').insertBefore(successDiv, document.querySelector('.upload-section'));
+        }
+    </script>
+</body>
+</html>
+'''
+
+if __name__ == '__main__':
+    print("🚀 Iniciando servidor Flask...")
+    print("📱 Acesse: http://localhost:5000")
+    app.run(debug=True, host='0.0.0.0', port=5000)
